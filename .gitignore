@@ -11,6 +11,7 @@ __pycache__/
 venv/
 env/
 ENV/
+/lelab_twins/
 
 # IDE and Editor files
 .vscode/
@@ -42,6 +43,7 @@ logs/
 .pytest_cache/
 .tox/
 htmlcov/
+.ruff_cache/
 
 # Node.js (in case frontend files leak to root)
 node_modules/

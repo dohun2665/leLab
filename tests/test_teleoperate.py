@@ -152,3 +152,133 @@ def test_start_teleoperation_disconnects_follower_when_leader_fails(
     # The already-connected follower must have been cleaned up.
     assert created["follower"].disconnected is True
     assert teleop.teleoperation_active is False
+
+
+# --- Bimanual ------------------------------------------------------------
+
+
+class _RecordingDevice:
+    """Bimanual test double: connects unless told to fail, tracks disconnects."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self._fail = fail
+        self.disconnected = False
+        self.cameras: dict = {}
+        self.calibration: dict = {}
+
+        class _Bus:
+            def __init__(self, outer: _RecordingDevice) -> None:
+                self._outer = outer
+
+            def connect(self) -> None:
+                if self._outer._fail:
+                    raise RuntimeError("port unavailable")
+
+            def write_calibration(self, calibration: dict) -> None:
+                pass
+
+        self.bus = _Bus(self)
+
+    def calibrate(self) -> None:
+        pass
+
+    def configure(self) -> None:
+        pass
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def _bimanual_request(**overrides) -> teleop.TeleoperateRequest:  # noqa: F821 - resolved at call site
+    import lelab.teleoperate as teleop
+
+    defaults = {
+        "leader_port": "COM_L_LEADER",
+        "follower_port": "COM_L_FOLLOWER",
+        "leader_config": "left",
+        "follower_config": "left",
+        "robot_type": "so101",
+        "right_leader_port": "COM_R_LEADER",
+        "right_follower_port": "COM_R_FOLLOWER",
+        "right_leader_config": "right",
+        "right_follower_config": "right",
+        "right_robot_type": "so101",
+    }
+    defaults.update(overrides)
+    return teleop.TeleoperateRequest(**defaults)
+
+
+def test_bimanual_teleoperation_reports_which_arm_failed_to_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lelab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(
+        teleop, "setup_calibration_files", lambda leader, follower, *args: ("leader", "follower")
+    )
+
+    created: dict = {}
+    counts = {"follower": 0, "leader": 0}
+
+    def _fake_make_device(robot_type, side, config):
+        # Construction order is left_robot, right_robot, left_teleop,
+        # right_teleop, so the 2nd "follower" call is the right follower.
+        idx = counts[side]
+        counts[side] += 1
+        fail = side == "follower" and idx == 1
+        device = _RecordingDevice(fail=fail)
+        created[f"{side}-{idx}"] = device
+        return device
+
+    monkeypatch.setattr(teleop, "make_device", _fake_make_device)
+
+    result = teleop.handle_start_teleoperation(_bimanual_request())
+
+    assert result["success"] is False
+    assert "right follower" in result["message"].lower()
+    assert "COM_R_FOLLOWER" in result["message"]
+    assert teleop.teleoperation_active is False
+    assert teleop.current_bimanual_types is None
+
+
+def test_bimanual_teleoperation_cleans_up_all_devices_on_late_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the right leader (last of the 4) fails to connect, the three
+    already-connected devices must all be disconnected."""
+    import lelab.teleoperate as teleop
+
+    monkeypatch.setattr(teleop, "teleoperation_active", False)
+    monkeypatch.setattr(
+        teleop, "setup_calibration_files", lambda leader, follower, *args: ("leader", "follower")
+    )
+
+    created: list[_RecordingDevice] = []
+
+    def _fake_make_device(robot_type, side, config):
+        # 4th device constructed (right leader) is the failing one.
+        device = _RecordingDevice(fail=len(created) == 3)
+        created.append(device)
+        return device
+
+    monkeypatch.setattr(teleop, "make_device", _fake_make_device)
+
+    result = teleop.handle_start_teleoperation(_bimanual_request())
+
+    assert result["success"] is False
+    assert "right leader" in result["message"].lower()
+    assert all(d.disconnected for d in created)
+    assert teleop.teleoperation_active is False
+
+
+def test_get_joint_positions_from_bimanual_robot_prefixes_both_sides() -> None:
+    from lelab.teleoperate import get_joint_positions_from_bimanual_robot
+
+    class _FakeBimanual:
+        def get_observation(self) -> dict[str, float]:
+            return {"left_shoulder_pan.pos": 10.0, "right_shoulder_pan.pos": 20.0}
+
+    positions = get_joint_positions_from_bimanual_robot(_FakeBimanual(), "so101", "so101")
+    assert "left_Rotation" in positions
+    assert "right_Rotation" in positions

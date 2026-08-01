@@ -50,6 +50,9 @@ teleoperation_thread: threading.Thread | None = None
 current_robot = None
 current_teleop = None
 current_robot_type = "so101"
+# Set to (left_robot_type, right_robot_type) for a bimanual session, else
+# None. Lets status/joint-position handlers pick the right URDF mapping.
+current_bimanual_types: tuple[str, str] | None = None
 # Guards the start path; the worker owns disconnect so stop() does not race.
 _state_lock = threading.Lock()
 
@@ -60,6 +63,13 @@ class TeleoperateRequest(BaseModel):
     leader_config: str
     follower_config: str
     robot_type: str = "so101"
+    # Right arm (bimanual only). Left blank for a single-arm session; the
+    # fields above describe the left arm (or the only arm).
+    right_leader_port: str = ""
+    right_follower_port: str = ""
+    right_leader_config: str = ""
+    right_follower_config: str = ""
+    right_robot_type: str = "so101"
 
 
 _SO101_URDF_MAPPING = {
@@ -82,6 +92,45 @@ _OMX_URDF_MAPPING = {
     "wrist_roll": "joint5",
     "gripper": "gripper_joint_1",
 }
+
+
+def _motor_angle_degrees(motor_name: str, raw_value: float, is_omx: bool) -> float:
+    """Convert a motor's raw observation value to degrees for URDF display.
+
+    OMX reports position as a percentage of its calibrated range
+    (MotorNormMode.RANGE_M100_100 for the arm, RANGE_0_100 for the gripper)
+    rather than SO-101's degrees. Approximate the arm joints' +-100% as +-180
+    degrees (Dynamixel's one-turn 4096-tick convention) and the gripper's
+    0-100% as a small opening swing - this is a visualization approximation,
+    not a precisely calibrated angle.
+    """
+    if is_omx:
+        return (raw_value / 100.0) * 60.0 if motor_name == "gripper" else raw_value * 1.8
+    return raw_value
+
+
+def get_joint_positions_from_bimanual_robot(
+    robot, left_robot_type: str, right_robot_type: str
+) -> dict[str, float]:
+    """Same as `get_joint_positions_from_robot`, but for a BimanualRobot whose
+    `get_observation()` returns left_/right_-prefixed keys. Output URDF joint
+    names are prefixed the same way so the frontend can route each half of
+    the stream to its own 3D viewer."""
+    try:
+        observation = robot.get_observation()
+    except Exception as e:
+        logger.error(f"Error getting bimanual joint positions: {e}")
+        observation = {}
+
+    joint_positions: dict[str, float] = {}
+    for prefix, robot_type in (("left_", left_robot_type), ("right_", right_robot_type)):
+        is_omx = "omx" in robot_type.lower()
+        mapping = _OMX_URDF_MAPPING if is_omx else _SO101_URDF_MAPPING
+        for motor_name, urdf_joint_name in mapping.items():
+            raw_value = observation.get(f"{prefix}{motor_name}.pos")
+            angle_degrees = 0.0 if raw_value is None else _motor_angle_degrees(motor_name, raw_value, is_omx)
+            joint_positions[f"{prefix}{urdf_joint_name}"] = angle_degrees * math.pi / 180.0
+    return joint_positions
 
 
 def get_joint_positions_from_robot(robot, robot_type: str = "so101") -> dict[str, float]:
@@ -158,6 +207,183 @@ def _safe_disconnect(device) -> None:
     safe_disconnect_device(device, logger)
 
 
+def _start_bimanual_teleoperation(request: TeleoperateRequest, websocket_manager=None) -> dict[str, Any]:
+    """Bimanual variant of `handle_start_teleoperation`: connects 4 devices
+    (left+right leader/follower) and drives them from one worker loop via a
+    BimanualRobot/BimanualTeleoperator composite (see utils/bimanual.py), so
+    the loop body reads like the single-arm case. Callers must have already
+    claimed `teleoperation_active` under `_state_lock` before calling this.
+    """
+    global teleoperation_active, teleoperation_thread, current_robot, current_teleop, current_robot_type
+    global current_bimanual_types
+
+    from .utils.bimanual import BimanualRobot, BimanualTeleoperator
+
+    left_robot = right_robot = left_teleop = right_teleop = None
+    try:
+        logger.info(
+            "Starting bimanual teleoperation: left leader=%s follower=%s, right leader=%s follower=%s",
+            request.leader_port,
+            request.follower_port,
+            request.right_leader_port,
+            request.right_follower_port,
+        )
+
+        left_leader_config_name, left_follower_config_name = setup_calibration_files(
+            request.leader_config, request.follower_config, request.robot_type
+        )
+        right_leader_config_name, right_follower_config_name = setup_calibration_files(
+            request.right_leader_config, request.right_follower_config, request.right_robot_type
+        )
+
+        left_robot_config = make_device_config(
+            robot_type=request.robot_type,
+            side="follower",
+            port=request.follower_port,
+            config_id=left_follower_config_name,
+        )
+        right_robot_config = make_device_config(
+            robot_type=request.right_robot_type,
+            side="follower",
+            port=request.right_follower_port,
+            config_id=right_follower_config_name,
+        )
+        left_teleop_config = make_device_config(
+            robot_type=request.robot_type,
+            side="leader",
+            port=request.leader_port,
+            config_id=left_leader_config_name,
+        )
+        right_teleop_config = make_device_config(
+            robot_type=request.right_robot_type,
+            side="leader",
+            port=request.right_leader_port,
+            config_id=right_leader_config_name,
+        )
+
+        logger.info("Initializing robot and teleop devices...")
+        left_robot = make_device(request.robot_type, "follower", left_robot_config)
+        right_robot = make_device(request.right_robot_type, "follower", right_robot_config)
+        left_teleop = make_device(request.robot_type, "leader", left_teleop_config)
+        right_teleop = make_device(request.right_robot_type, "leader", right_teleop_config)
+
+        # Connect each arm separately so the error names which one failed.
+        for label, device, port in (
+            ("left follower", left_robot, request.follower_port),
+            ("right follower", right_robot, request.right_follower_port),
+            ("left leader", left_teleop, request.leader_port),
+            ("right leader", right_teleop, request.right_leader_port),
+        ):
+            logger.info(f"Connecting to {label} arm...")
+            try:
+                device.bus.connect()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not connect to the {label} arm on {port}. "
+                    "Make sure it's plugged in and powered on, then try again."
+                ) from e
+
+        logger.info("Writing calibration to motors...")
+        for device in (left_robot, right_robot, left_teleop, right_teleop):
+            if device.calibration:
+                # Homing_Offset (and the other calibration registers) are
+                # EEPROM-area writes that some motor protocols reject while
+                # torque is enabled ("Writing or Reading is not available to
+                # target address"). A motor left torqued-on by an earlier
+                # abnormal disconnect would otherwise fail every subsequent
+                # connect attempt until power-cycled.
+                device.bus.disable_torque()
+                device.bus.write_calibration(device.calibration)
+            else:
+                device.calibrate()
+
+        logger.info("Connecting cameras and configuring motors...")
+        for cam in left_robot.cameras.values():
+            cam.connect()
+        for cam in right_robot.cameras.values():
+            cam.connect()
+        left_robot.configure()
+        right_robot.configure()
+        left_teleop.configure()
+        right_teleop.configure()
+        logger.info("Successfully connected to all four devices")
+
+        robot = BimanualRobot(left_robot, right_robot)
+        teleop_device = BimanualTeleoperator(left_teleop, right_teleop)
+
+        current_robot = robot
+        current_teleop = teleop_device
+        current_robot_type = f"{request.robot_type}+{request.right_robot_type}"
+        current_bimanual_types = (request.robot_type, request.right_robot_type)
+
+        def teleoperation_worker():
+            global teleoperation_active, current_robot, current_teleop, current_bimanual_types
+
+            logger.info("Starting bimanual teleoperation loop...")
+            try:
+                last_broadcast_time = 0
+                broadcast_interval = 0.05  # 20 FPS
+
+                while teleoperation_active:
+                    action = teleop_device.get_action()
+                    robot.send_action(action)
+
+                    current_time = time.time()
+                    if current_time - last_broadcast_time >= broadcast_interval:
+                        try:
+                            joint_positions = get_joint_positions_from_bimanual_robot(
+                                robot, request.robot_type, request.right_robot_type
+                            )
+                            joint_data = {
+                                "type": "joint_update",
+                                "joints": joint_positions,
+                                "timestamp": current_time,
+                            }
+                            if websocket_manager and websocket_manager.active_connections:
+                                websocket_manager.broadcast_joint_data_sync(joint_data)
+                            last_broadcast_time = current_time
+                        except Exception as e:
+                            logger.error(f"Error broadcasting joint data: {e}")
+
+                    time.sleep(0.001)
+            except Exception as e:
+                logger.error(f"Error during bimanual teleoperation loop: {e}")
+            finally:
+                _safe_disconnect(robot)
+                _safe_disconnect(teleop_device)
+                logger.info("Bimanual teleoperation stopped")
+                teleoperation_active = False
+                current_robot = None
+                current_teleop = None
+                current_bimanual_types = None
+
+        teleoperation_thread = threading.Thread(
+            target=teleoperation_worker, name="teleoperation-worker-bimanual", daemon=True
+        )
+        teleoperation_thread.start()
+
+        return {
+            "success": True,
+            "message": "Bimanual teleoperation started successfully",
+            "leader_port": request.leader_port,
+            "follower_port": request.follower_port,
+            "right_leader_port": request.right_leader_port,
+            "right_follower_port": request.right_follower_port,
+        }
+
+    except Exception as e:
+        _safe_disconnect(left_robot)
+        _safe_disconnect(right_robot)
+        _safe_disconnect(left_teleop)
+        _safe_disconnect(right_teleop)
+        teleoperation_active = False
+        current_robot = None
+        current_teleop = None
+        current_bimanual_types = None
+        logger.error(f"Failed to start bimanual teleoperation: {e}")
+        return {"success": False, "message": str(e)}
+
+
 def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=None) -> dict[str, Any]:
     """Handle start teleoperation request.
 
@@ -178,6 +404,9 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         if _rollout.inference_active:
             return {"success": False, "message": "Inference is currently active. Stop it first."}
         teleoperation_active = True
+
+    if request.right_leader_port and request.right_follower_port:
+        return _start_bimanual_teleoperation(request, websocket_manager)
 
     robot = None
     teleop_device = None
@@ -238,12 +467,19 @@ def handle_start_teleoperation(request: TeleoperateRequest, websocket_manager=No
         # web calibration wizard), `device.calibration` is empty at this point —
         # call `calibrate()` so the device writes+caches+saves its own values
         # instead of pushing an empty calibration to the bus.
+        # Homing_Offset (and the other calibration registers) are EEPROM-area
+        # writes that some motor protocols reject while torque is enabled
+        # ("Writing or Reading is not available to target address"). A motor
+        # left torqued-on by an earlier abnormal disconnect would otherwise
+        # fail every subsequent connect attempt until power-cycled.
         logger.info("Writing calibration to motors...")
         if robot.calibration:
+            robot.bus.disable_torque()
             robot.bus.write_calibration(robot.calibration)
         else:
             robot.calibrate()
         if teleop_device.calibration:
+            teleop_device.bus.disable_torque()
             teleop_device.bus.write_calibration(teleop_device.calibration)
         else:
             teleop_device.calibrate()
@@ -370,7 +606,11 @@ def handle_get_joint_positions() -> dict[str, Any]:
         return {"success": False, "message": "No active teleoperation session"}
 
     try:
-        joint_positions = get_joint_positions_from_robot(current_robot, current_robot_type)
+        if current_bimanual_types is not None:
+            left_type, right_type = current_bimanual_types
+            joint_positions = get_joint_positions_from_bimanual_robot(current_robot, left_type, right_type)
+        else:
+            joint_positions = get_joint_positions_from_robot(current_robot, current_robot_type)
         return {"success": True, "joint_positions": joint_positions, "timestamp": time.time()}
     except Exception as e:
         logger.error(f"Error getting joint positions: {e}")

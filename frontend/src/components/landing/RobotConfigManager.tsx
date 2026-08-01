@@ -11,7 +11,11 @@ interface RobotConfigManagerProps {
   availableNames: string[];
   isLoading: boolean;
   selectRobot: (name: string) => void;
-  createRobot: (name: string, robotType: string) => Promise<boolean>;
+  createRobot: (
+    name: string,
+    robotType: string,
+    options?: { bimanual?: boolean; rightRobotType?: string }
+  ) => Promise<boolean>;
   deleteRobot: (name: string) => Promise<boolean>;
 }
 
@@ -43,6 +47,15 @@ const RobotConfigManager: React.FC<RobotConfigManagerProps> = ({
           leader_config: robot.leader_config,
           follower_config: robot.follower_config,
           robot_type: robot.robot_type || "so101",
+          ...(robot.mode === "bimanual"
+            ? {
+                right_leader_port: robot.right_leader_port,
+                right_follower_port: robot.right_follower_port,
+                right_leader_config: robot.right_leader_config,
+                right_follower_config: robot.right_follower_config,
+                right_robot_type: robot.right_robot_type || "so101",
+              }
+            : {}),
         }),
       });
       const data = await res.json();

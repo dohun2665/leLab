@@ -18,7 +18,7 @@ import {
   setupModelLoading,
   URDFViewerElement,
 } from "@/lib/urdfViewerHelpers";
-import { DEFAULT_URDF_PATHS } from "@/lib/defaultUrdfModels";
+import { DEFAULT_URDF_PATHS, DefaultRobotType } from "@/lib/defaultUrdfModels";
 
 // Register the URDFManipulator as a custom element if it hasn't been already
 if (typeof window !== "undefined" && !customElements.get("urdf-viewer")) {
@@ -32,15 +32,26 @@ interface UrdfViewerElement extends HTMLElement {
   setJointValue?: (jointName: string, value: number) => void;
 }
 
-const UrdfViewer: React.FC = () => {
+interface UrdfViewerProps {
+  // Bimanual only: overrides the shared UrdfContext's `defaultRobotType` for
+  // this viewer instance, so a left/right pair of viewers can each show their
+  // own arm's model. Omit for the normal single-arm, context-driven viewer.
+  robotType?: DefaultRobotType;
+  // Bimanual only: filters the joint-data broadcast to this side (see
+  // useRealTimeJoints). Omit for a single-arm viewer.
+  jointPrefix?: string;
+}
+
+const UrdfViewer: React.FC<UrdfViewerProps> = ({ robotType: robotTypeProp, jointPrefix }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [highlightedJoint, setHighlightedJoint] = useState<string | null>(null);
   const {
     registerUrdfProcessor,
     alternativeUrdfModels,
     isDefaultModel,
-    defaultRobotType,
+    defaultRobotType: contextDefaultRobotType,
   } = useUrdf();
+  const defaultRobotType = robotTypeProp ?? contextDefaultRobotType;
 
   const cleanupAnimationRef = useRef<(() => void) | null>(null);
   const viewerRef = useRef<URDFViewerElement | null>(null);
@@ -50,6 +61,7 @@ const UrdfViewer: React.FC = () => {
   const { isConnected: isWebSocketConnected } = useRealTimeJoints({
     viewerRef,
     enabled: isDefaultModel, // Only enable WebSocket for default model
+    jointPrefix,
   });
 
   // Add state for custom URDF path

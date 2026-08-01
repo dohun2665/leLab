@@ -64,9 +64,13 @@ def tmp_lerobot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "PORT_CONFIG_PATH", str(port_dir))
     monkeypatch.setattr(cfg, "LEADER_PORT_FILE", str(port_dir / "leader_port.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_PORT_FILE", str(port_dir / "follower_port.txt"))
+    monkeypatch.setattr(cfg, "RIGHT_LEADER_PORT_FILE", str(port_dir / "right_leader_port.txt"))
+    monkeypatch.setattr(cfg, "RIGHT_FOLLOWER_PORT_FILE", str(port_dir / "right_follower_port.txt"))
     monkeypatch.setattr(cfg, "CONFIG_STORAGE_PATH", str(saved_dir))
     monkeypatch.setattr(cfg, "LEADER_CONFIG_FILE", str(saved_dir / "leader_config.txt"))
     monkeypatch.setattr(cfg, "FOLLOWER_CONFIG_FILE", str(saved_dir / "follower_config.txt"))
+    monkeypatch.setattr(cfg, "RIGHT_LEADER_CONFIG_FILE", str(saved_dir / "right_leader_config.txt"))
+    monkeypatch.setattr(cfg, "RIGHT_FOLLOWER_CONFIG_FILE", str(saved_dir / "right_follower_config.txt"))
 
     return cache
 

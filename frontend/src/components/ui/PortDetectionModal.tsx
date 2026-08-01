@@ -11,14 +11,19 @@ import { Loader2, CheckCircle, AlertCircle } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 
+export type PortDetectionSide = "leader" | "follower" | "right_leader" | "right_follower";
+
 interface PortDetectionModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  robotType: "leader" | "follower";
+  robotType: PortDetectionSide;
   onPortDetected: (port: string) => void;
 }
 
 const SUCCESS_HOLD_MS = 2000;
+
+// "right_leader" -> "right leader", "follower" -> "follower".
+const sideLabel = (side: PortDetectionSide): string => side.replace("_", " ");
 
 const PortDetectionModal: React.FC<PortDetectionModalProps> = ({
   open,
@@ -78,7 +83,7 @@ const PortDetectionModal: React.FC<PortDetectionModalProps> = ({
           setStep("success");
           toast({
             title: "Port Detected Successfully",
-            description: `${robotType} port detected: ${data.port}`,
+            description: `${sideLabel(robotType)} port detected: ${data.port}`,
           });
           successTimerRef.current = window.setTimeout(() => {
             if (cancelledRef.current) return;
@@ -152,10 +157,10 @@ const PortDetectionModal: React.FC<PortDetectionModalProps> = ({
             <Loader2 className="w-16 h-16 text-blue-500 mx-auto animate-spin" />
             <div className="space-y-2">
               <h3 className="text-lg font-semibold text-white">
-                Unplug the {robotType} arm
+                Unplug the {sideLabel(robotType)} arm
               </h3>
               <p className="text-gray-400">
-                Disconnect the {robotType} robot arm from USB. The port will be
+                Disconnect the {sideLabel(robotType)} robot arm from USB. The port will be
                 detected automatically.
               </p>
             </div>
@@ -229,7 +234,7 @@ const PortDetectionModal: React.FC<PortDetectionModalProps> = ({
             Port Detection
           </DialogTitle>
           <DialogDescription className="text-gray-400 text-center">
-            Detect the USB port for your {robotType} arm
+            Detect the USB port for your {sideLabel(robotType)} arm
           </DialogDescription>
         </DialogHeader>
 

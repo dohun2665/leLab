@@ -114,6 +114,48 @@ def make_device_config(
         raise ValueError(f"Unsupported robot model: {robot_type}")
 
 
+def make_bimanual_device_config(
+    left_robot_type: str,
+    right_robot_type: str,
+    side: Literal["leader", "follower"],
+    left_port: str,
+    right_port: str,
+    left_config_id: str,
+    right_config_id: str,
+    left_cameras: dict | None = None,
+    right_cameras: dict | None = None,
+) -> Any:
+    """Build a BimanualRobotConfig/BimanualTeleoperatorConfig from two per-side
+    single-arm configs, reusing `make_device_config` for each side."""
+    from .bimanual import BimanualRobotConfig, BimanualTeleoperatorConfig
+
+    left_config = make_device_config(left_robot_type, side, left_port, left_config_id, cameras=left_cameras)
+    right_config = make_device_config(
+        right_robot_type, side, right_port, right_config_id, cameras=right_cameras
+    )
+    if side == "follower":
+        return BimanualRobotConfig(left=left_config, right=right_config)
+    return BimanualTeleoperatorConfig(left=left_config, right=right_config)
+
+
+def make_bimanual_device(
+    left_robot_type: str,
+    right_robot_type: str,
+    side: Literal["leader", "follower"],
+    left_config: Any,
+    right_config: Any,
+) -> Any:
+    """Build a BimanualRobot/BimanualTeleoperator from two per-side single-arm
+    configs, reusing `make_device` for each side."""
+    from .bimanual import BimanualRobot, BimanualTeleoperator
+
+    left = make_device(left_robot_type, side, left_config)
+    right = make_device(right_robot_type, side, right_config)
+    if side == "follower":
+        return BimanualRobot(left, right)
+    return BimanualTeleoperator(left, right)
+
+
 def make_device(robot_type: str, side: Literal["leader", "follower"], config: Any) -> Any:
     """Create a LeRobot device instance dynamically based on robot type and config."""
     model = robot_type.lower()

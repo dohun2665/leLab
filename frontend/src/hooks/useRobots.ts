@@ -13,6 +13,14 @@ export interface RobotRecord {
   cameras: CameraConfig[];
   is_clean: boolean;
   robot_type?: string;
+  // Bimanual (mode === "bimanual"): the fields above describe the left arm
+  // (or the only arm, in "single" mode); these describe the right arm.
+  mode?: "single" | "bimanual";
+  right_leader_port?: string;
+  right_follower_port?: string;
+  right_leader_config?: string;
+  right_follower_config?: string;
+  right_robot_type?: string;
 }
 
 const SELECTED_KEY = "lelab.selectedRobot";
@@ -87,7 +95,11 @@ export const useRobots = () => {
   }, []);
 
   const createRobot = useCallback(
-    async (rawName: string, robotType: string = "so101"): Promise<boolean> => {
+    async (
+      rawName: string,
+      robotType: string = "so101",
+      options?: { bimanual?: boolean; rightRobotType?: string }
+    ): Promise<boolean> => {
       const name = rawName.trim();
       if (!name) {
         toast({ title: "Missing name", description: "Robot name cannot be empty.", variant: "destructive" });
@@ -97,11 +109,16 @@ export const useRobots = () => {
         toast({ title: "Invalid name", description: "Robot names cannot contain '/', '\\', or '..'", variant: "destructive" });
         return false;
       }
+      const body: Record<string, string> = { robot_type: robotType };
+      if (options?.bimanual) {
+        body.mode = "bimanual";
+        body.right_robot_type = options.rightRobotType ?? "so101";
+      }
       try {
         const res = await fetchWithHeaders(`${baseUrl}/robots/${encodeURIComponent(name)}?create=true`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ robot_type: robotType }),
+          body: JSON.stringify(body),
         });
         if (res.status === 409) {
           toast({

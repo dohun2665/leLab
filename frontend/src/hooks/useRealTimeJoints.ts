@@ -12,6 +12,11 @@ interface UseRealTimeJointsProps {
   viewerRef: React.RefObject<URDFViewerElement>;
   enabled?: boolean;
   websocketUrl?: string;
+  // Bimanual only: the broadcast carries both arms' joints prefixed
+  // "left_"/"right_" (e.g. "left_Rotation"). When set, only joints with this
+  // prefix are applied to this viewer, with the prefix stripped before
+  // calling setJointValue. Omit for a single-arm viewer (unprefixed joints).
+  jointPrefix?: string;
 }
 
 const INITIAL_RECONNECT_DELAY_MS = 1000;
@@ -21,6 +26,7 @@ export const useRealTimeJoints = ({
   viewerRef,
   enabled = true,
   websocketUrl,
+  jointPrefix,
 }: UseRealTimeJointsProps) => {
   const { wsBaseUrl } = useApi();
   const finalWebSocketUrl = websocketUrl || `${wsBaseUrl}/ws/joint-data`;
@@ -36,14 +42,16 @@ export const useRealTimeJoints = ({
       const viewer = viewerRef.current;
       if (!viewer || typeof viewer.setJointValue !== "function") return;
       Object.entries(joints).forEach(([jointName, value]) => {
+        if (jointPrefix && !jointName.startsWith(jointPrefix)) return;
+        const targetJoint = jointPrefix ? jointName.slice(jointPrefix.length) : jointName;
         try {
-          viewer.setJointValue(jointName, value);
+          viewer.setJointValue(targetJoint, value);
         } catch (error) {
-          console.warn(`Failed to set joint ${jointName}:`, error);
+          console.warn(`Failed to set joint ${targetJoint}:`, error);
         }
       });
     },
-    [viewerRef]
+    [viewerRef, jointPrefix]
   );
 
   useEffect(() => {

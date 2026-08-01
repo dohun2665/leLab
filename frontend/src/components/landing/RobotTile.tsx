@@ -23,7 +23,11 @@ interface RobotTileProps {
   availableNames: string[];
   isLoading: boolean;
   onSelect: (name: string) => void;
-  onCreateNew: (name: string) => Promise<boolean>;
+  onCreateNew: (
+    name: string,
+    robotType: string,
+    options?: { bimanual?: boolean; rightRobotType?: string }
+  ) => Promise<boolean>;
   onConfigure: (name: string) => void;
   onTeleop: (robot: RobotRecord) => void;
   onDelete: (name: string) => void;
