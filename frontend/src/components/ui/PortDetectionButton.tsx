@@ -1,10 +1,11 @@
 import React from "react";
 import { Button } from "@/components/ui/button";
 import { Search } from "lucide-react";
+import type { PortDetectionSide } from "@/components/ui/PortDetectionModal";
 
 interface PortDetectionButtonProps {
   onClick: () => void;
-  robotType?: "leader" | "follower";
+  robotType?: PortDetectionSide;
   className?: string;
 }
 

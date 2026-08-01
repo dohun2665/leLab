@@ -121,6 +121,58 @@ def test_build_camera_configs_skips_non_opencv_type() -> None:
     assert configs == {}
 
 
+def test_split_cameras_by_side_routes_by_prefix_and_defaults_to_left() -> None:
+    from lelab.record import _split_cameras_by_side
+
+    cameras = {
+        "left_wrist": {"camera_index": 0},
+        "right_wrist": {"camera_index": 1},
+        "top": {"camera_index": 2},  # unprefixed -> left
+    }
+    left, right = _split_cameras_by_side(cameras)
+
+    assert left == {"wrist": {"camera_index": 0}, "top": {"camera_index": 2}}
+    assert right == {"wrist": {"camera_index": 1}}
+
+
+def test_create_record_config_builds_bimanual_config_when_right_arm_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lelab.record as record
+    from lelab.record import RecordingRequest, create_record_config
+    from lelab.utils.bimanual import BimanualRobotConfig, BimanualTeleoperatorConfig
+
+    monkeypatch.setattr(record, "setup_calibration_files", lambda leader, follower, *args: ("leader", "follower"))
+
+    request = RecordingRequest(
+        leader_port="COM_L_LEADER",
+        follower_port="COM_L_FOLLOWER",
+        leader_config="left",
+        follower_config="left",
+        dataset_repo_id="user/dataset",
+        single_task="pick up the cube",
+        robot_type="so101",
+        right_leader_port="COM_R_LEADER",
+        right_follower_port="COM_R_FOLLOWER",
+        right_leader_config="right",
+        right_follower_config="right",
+        right_robot_type="so101",
+        cameras={
+            "left_wrist": {"type": "opencv", "camera_index": 0, "width": 640, "height": 480, "fps": 30},
+            "right_wrist": {"type": "opencv", "camera_index": 1, "width": 640, "height": 480, "fps": 30},
+        },
+    )
+
+    config = create_record_config(request)
+
+    assert isinstance(config.robot, BimanualRobotConfig)
+    assert isinstance(config.teleop, BimanualTeleoperatorConfig)
+    assert config.robot.left.port == "COM_L_FOLLOWER"
+    assert config.robot.right.port == "COM_R_FOLLOWER"
+    assert "wrist" in config.robot.left.cameras
+    assert "wrist" in config.robot.right.cameras
+
+
 def test_recording_status_surfaces_error_and_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     """When the recording session ends with an error, handle_recording_status must
     correctly return the error traceback/message and a friendly troubleshooting hint.

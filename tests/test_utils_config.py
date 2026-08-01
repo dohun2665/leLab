@@ -194,3 +194,130 @@ def test_with_lelab_tag_dedupes() -> None:
 
     # Caller-supplied LeLab is not duplicated, and order is preserved.
     assert with_lelab_tag(["robotics", LELAB_TAG, "lerobot"]) == ["robotics", LELAB_TAG, "lerobot"]
+
+
+# --- Bimanual (right arm) -----------------------------------------------
+
+
+def test_right_arm_port_persistence_round_trips(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_port("right_leader", "/dev/ttyUSB2")
+    cfg.save_robot_port("right_follower", "/dev/ttyUSB3")
+
+    assert cfg.get_saved_robot_port("right_leader") == "/dev/ttyUSB2"
+    assert cfg.get_saved_robot_port("right_follower") == "/dev/ttyUSB3"
+    # Left/single-arm slots are untouched by right-arm saves.
+    assert cfg.get_saved_robot_port("leader") is None
+
+
+def test_right_arm_config_persistence_round_trips(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_config("right_follower", "right_calib")
+    assert cfg.get_saved_robot_config("right_follower") == "right_calib"
+    assert cfg.get_saved_robot_config("follower") is None
+
+
+def test_port_file_for_rejects_unknown_side(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    with pytest.raises(ValueError):
+        cfg._port_file_for("sideways")  # type: ignore[arg-type]
+
+
+def test_bimanual_record_round_trips_left_and_right_fields(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    data = {
+        "mode": "bimanual",
+        "leader_port": "/dev/ttyUSB0",
+        "follower_port": "/dev/ttyUSB1",
+        "leader_config": "rig.json",
+        "follower_config": "rig.json",
+        "robot_type": "so101",
+        "right_leader_port": "/dev/ttyUSB2",
+        "right_follower_port": "/dev/ttyUSB3",
+        "right_leader_config": "rig_right.json",
+        "right_follower_config": "rig_right.json",
+        "right_robot_type": "omx_ai",
+    }
+    assert cfg.save_robot_record("rig", data, allow_create=True)
+
+    loaded = cfg.get_robot_record("rig")
+    assert loaded is not None
+    assert loaded["mode"] == "bimanual"
+    assert loaded["right_leader_port"] == "/dev/ttyUSB2"
+    assert loaded["right_follower_config"] == "rig_right.json"
+    assert loaded["right_robot_type"] == "omx_ai"
+    # Left arm fields are unaffected by the right arm's presence.
+    assert loaded["leader_port"] == "/dev/ttyUSB0"
+
+
+def test_empty_record_defaults_to_single_arm_mode(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record("solo", {"leader_port": "/dev/x"}, allow_create=True)
+    loaded = cfg.get_robot_record("solo")
+    assert loaded is not None
+    assert loaded["mode"] == "single"
+    assert loaded["right_leader_port"] == ""
+
+
+def test_is_robot_record_clean_bimanual_requires_both_arms(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    left_only = {
+        "mode": "bimanual",
+        "leader_port": "/dev/ttyUSB0",
+        "follower_port": "/dev/ttyUSB1",
+        "leader_config": "l.json",
+        "follower_config": "l.json",
+        "robot_type": "omx_ai",  # OMX is exempt from the calibration-file check
+        "right_leader_port": "",
+        "right_follower_port": "",
+        "right_leader_config": "",
+        "right_follower_config": "",
+        "right_robot_type": "omx_ai",
+    }
+    assert not cfg.is_robot_record_clean(left_only)
+
+    both_arms = {
+        **left_only,
+        "right_leader_port": "/dev/ttyUSB2",
+        "right_follower_port": "/dev/ttyUSB3",
+        "right_leader_config": "r.json",
+        "right_follower_config": "r.json",
+    }
+    assert cfg.is_robot_record_clean(both_arms)
+
+
+def test_is_robot_record_clean_single_mode_ignores_right_fields(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    record = {
+        "mode": "single",
+        "leader_port": "/dev/ttyUSB0",
+        "follower_port": "/dev/ttyUSB1",
+        "leader_config": "l.json",
+        "follower_config": "l.json",
+        "robot_type": "omx_ai",
+    }
+    # Clean even though right_* fields are absent - single mode doesn't need them.
+    assert cfg.is_robot_record_clean(record)
+
+
+def test_save_robot_record_autofills_right_omx_config(tmp_lerobot_home: Path) -> None:
+    from lelab.utils import config as cfg
+
+    cfg.save_robot_record(
+        "omx_rig",
+        {"mode": "bimanual", "robot_type": "so101", "right_robot_type": "omx_ai"},
+        allow_create=True,
+    )
+    loaded = cfg.get_robot_record("omx_rig")
+    assert loaded is not None
+    assert loaded["right_leader_config"] == "omx_rig_right.json"
+    assert loaded["right_follower_config"] == "omx_rig_right.json"
+    # Left arm is so101 (not OMX) so it should NOT be autofilled.
+    assert loaded["leader_config"] == ""

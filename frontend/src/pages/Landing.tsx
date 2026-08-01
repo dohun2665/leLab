@@ -149,10 +149,15 @@ const Landing = () => {
       return;
     }
 
+    // lerobot's sanity_check_dataset_name() requires a "namespace/name" repo_id
+    // (it unconditionally does `repo_id.split("/")`) even for a local-only,
+    // never-pushed recording, so a bare name without a HF login crashes the
+    // session immediately after "Preparing session". "local" is never used
+    // for any actual Hub call since push_to_hub is false in that case.
     const datasetRepoId =
       auth.status === "authenticated"
         ? `${auth.username}/${datasetName}`
-        : datasetName;
+        : `local/${datasetName}`;
 
     if (cameras.length > 0 && releaseStreamsRef.current) {
       console.log("🔓 Releasing camera streams before starting recording...");
@@ -214,6 +219,15 @@ const Landing = () => {
       streaming_encoding: streamingEncoding,
       cameras: cameraDict,
       robot_type: robot.robot_type || "so101",
+      ...(robot.mode === "bimanual"
+        ? {
+            right_leader_port: robot.right_leader_port,
+            right_follower_port: robot.right_follower_port,
+            right_leader_config: robot.right_leader_config,
+            right_follower_config: robot.right_follower_config,
+            right_robot_type: robot.right_robot_type || "so101",
+          }
+        : {}),
     };
 
     setShowRecordingModal(false);

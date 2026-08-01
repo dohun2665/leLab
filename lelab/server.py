@@ -1130,7 +1130,7 @@ def get_available_cameras(request: Request):
         return {"status": "error", "message": str(e), "cameras": []}
 
 
-RobotSideLiteral = Literal["leader", "follower"]
+RobotSideLiteral = Literal["leader", "follower", "right_leader", "right_follower"]
 
 
 class PortDetectionBody(BaseModel):

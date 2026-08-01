@@ -193,6 +193,24 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
     }
   }, [releaseStreamsRef, releaseAllCameraStreams]);
 
+  // A camera already added here holds its browser stream open for the live
+  // preview, which makes the backend's cv2 open-check see it as busy - so a
+  // rescan can never surface a brand-new camera that shares a name with one
+  // already configured (identical models are indistinguishable except by the
+  // device the OS actually lets you open). Briefly release every preview
+  // stream before rescanning, then let them reconnect once the scan is done.
+  const rescanCameras = useCallback(async () => {
+    const hadPreviews = cameras.length > 0 && !streamsPaused;
+    if (hadPreviews) {
+      setStreamsPaused(true);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    await refreshCameras();
+    if (hadPreviews) {
+      setStreamsPaused(false);
+    }
+  }, [cameras.length, streamsPaused, refreshCameras]);
+
 
   return (
     <div className="space-y-4">
@@ -216,10 +234,10 @@ const CameraConfiguration: React.FC<CameraConfigurationProps> = ({
                 type="button"
                 variant="ghost"
                 size="icon"
-                onClick={() => refreshCameras()}
+                onClick={() => rescanCameras()}
                 disabled={isLoadingCameras}
                 className="h-6 w-6 text-gray-400 hover:text-white"
-                title="Rescan for cameras (e.g. after plugging in a new USB camera)"
+                title="Rescan for cameras (briefly pauses previews so an already-added camera doesn't hide a new one sharing its model)"
                 aria-label="Rescan for cameras"
               >
                 <RefreshCw

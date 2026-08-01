@@ -27,7 +27,12 @@ from lerobot.datasets import LeRobotDataset
 from lerobot.scripts.lerobot_record import RecordConfig
 
 from .utils.config import setup_calibration_files, with_lelab_tag
-from .utils.devices import friendly_hint, make_device_config, safe_disconnect_device
+from .utils.devices import (
+    friendly_hint,
+    make_bimanual_device_config,
+    make_device_config,
+    safe_disconnect_device,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,15 @@ class RecordingRequest(BaseModel):
     cameras: dict = {}
     test_mode: bool = False  # Skip robot connection for testing
     robot_type: str = "so101"
+    # Right arm (bimanual only). Left blank for a single-arm session; the
+    # fields above describe the left arm (or the only arm). Camera names
+    # prefixed "left_"/"right_" are routed to that side's follower config;
+    # unprefixed camera names are attached to the left follower.
+    right_leader_port: str = ""
+    right_follower_port: str = ""
+    right_leader_config: str = ""
+    right_follower_config: str = ""
+    right_robot_type: str = "so101"
 
 
 class UploadRequest(BaseModel):
@@ -141,8 +155,90 @@ def _build_camera_configs(cameras: dict, default_backend) -> dict:
     return camera_configs
 
 
+def _split_cameras_by_side(cameras: dict) -> tuple[dict, dict]:
+    """Split a bimanual request's camera dict by "left_"/"right_" name
+    prefix. Unprefixed names (e.g. a shared overhead camera) are attached to
+    the left follower."""
+    left: dict = {}
+    right: dict = {}
+    for name, cam in cameras.items():
+        if name.startswith("right_"):
+            right[name[len("right_") :]] = cam
+        elif name.startswith("left_"):
+            left[name[len("left_") :]] = cam
+        else:
+            left[name] = cam
+    return left, right
+
+
+def _create_bimanual_record_config(request: RecordingRequest) -> RecordConfig:
+    """Bimanual variant of `create_record_config`: builds a
+    BimanualRobotConfig/BimanualTeleoperatorConfig (utils/bimanual.py)
+    wrapping left+right single-arm configs, so `record_with_web_events`'s
+    factory dispatch only needs one isinstance branch to build the composite
+    instance."""
+    left_leader_config_name, left_follower_config_name = setup_calibration_files(
+        request.leader_config, request.follower_config, request.robot_type
+    )
+    right_leader_config_name, right_follower_config_name = setup_calibration_files(
+        request.right_leader_config, request.right_follower_config, request.right_robot_type
+    )
+
+    left_cameras, right_cameras = _split_cameras_by_side(request.cameras)
+    backend = _platform_backend()
+    left_camera_configs = _build_camera_configs(left_cameras, backend)
+    right_camera_configs = _build_camera_configs(right_cameras, backend)
+
+    robot_config = make_bimanual_device_config(
+        left_robot_type=request.robot_type,
+        right_robot_type=request.right_robot_type,
+        side="follower",
+        left_port=request.follower_port,
+        right_port=request.right_follower_port,
+        left_config_id=left_follower_config_name,
+        right_config_id=right_follower_config_name,
+        left_cameras=left_camera_configs,
+        right_cameras=right_camera_configs,
+    )
+    teleop_config = make_bimanual_device_config(
+        left_robot_type=request.robot_type,
+        right_robot_type=request.right_robot_type,
+        side="leader",
+        left_port=request.leader_port,
+        right_port=request.right_leader_port,
+        left_config_id=left_leader_config_name,
+        right_config_id=right_leader_config_name,
+    )
+
+    dataset_config = DatasetRecordConfig(
+        repo_id=request.dataset_repo_id,
+        single_task=request.single_task,
+        num_episodes=request.num_episodes,
+        episode_time_s=request.episode_time_s,
+        reset_time_s=request.reset_time_s,
+        fps=request.fps,
+        video=request.video,
+        push_to_hub=request.push_to_hub,
+        tags=with_lelab_tag(request.tags) if request.push_to_hub else None,
+        private=request.private,
+        streaming_encoding=request.streaming_encoding,
+    )
+
+    return RecordConfig(
+        robot=robot_config,
+        teleop=teleop_config,
+        dataset=dataset_config,
+        resume=request.resume,
+        display_data=False,
+        play_sounds=False,
+    )
+
+
 def create_record_config(request: RecordingRequest) -> RecordConfig:
     """Create a RecordConfig from the recording request"""
+    if request.right_leader_port and request.right_follower_port:
+        return _create_bimanual_record_config(request)
+
     # Setup calibration files
     leader_config_name, follower_config_name = setup_calibration_files(
         request.leader_config, request.follower_config, request.robot_type
@@ -310,7 +406,13 @@ def handle_start_recording(request: RecordingRequest) -> dict[str, Any]:
                     "robot_type": getattr(dataset.meta, "robot_type", "Unknown robot"),
                 }
             except Exception as e:
-                logger.exception("Recording session failed")
+                # lerobot's init_logging() installs a root formatter that only
+                # renders record.getMessage() and drops exc_info entirely, so
+                # logger.exception()'s traceback never reaches the log file.
+                # Log it as plain message text instead so it's actually visible.
+                import traceback
+
+                logger.error("Recording session failed:\n%s", traceback.format_exc())
                 current_phase = "error"
                 if recording_start_time:
                     session_end_elapsed_seconds = int(time.time() - recording_start_time)
@@ -596,8 +698,28 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
 
     global current_phase, phase_start_time, current_episode, saved_episodes
 
-    robot = make_robot_from_config(cfg.robot)
-    teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+    # `make_robot_from_config`/`make_teleoperator_from_config` are lerobot's
+    # own draccus-registry factories - they don't know about lelab's
+    # BimanualRobotConfig/BimanualTeleoperatorConfig, so those two types are
+    # special-cased and built directly instead.
+    from .utils.bimanual import (
+        BimanualRobot,
+        BimanualRobotConfig,
+        BimanualTeleoperator,
+        BimanualTeleoperatorConfig,
+    )
+
+    robot = (
+        BimanualRobot.from_config(cfg.robot)
+        if isinstance(cfg.robot, BimanualRobotConfig)
+        else make_robot_from_config(cfg.robot)
+    )
+    if cfg.teleop is None:
+        teleop = None
+    elif isinstance(cfg.teleop, BimanualTeleoperatorConfig):
+        teleop = BimanualTeleoperator.from_config(cfg.teleop)
+    else:
+        teleop = make_teleoperator_from_config(cfg.teleop)
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
@@ -668,11 +790,24 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     # Ensure calibration is properly loaded and applied to the devices
     logger.info("Applying calibration to devices")
 
-    # Write calibration to motors' memory (similar to teleoperation code)
+    # Write calibration to motors' memory (similar to teleoperation code).
+    # Homing_Offset (and the other calibration registers) are EEPROM-area
+    # writes that some motor protocols reject while torque is enabled
+    # ("Writing or Reading is not available to target address") - disable it
+    # first so a motor left torqued-on by an earlier abnormal disconnect
+    # doesn't fail every subsequent connect attempt until power-cycled.
+    # `robot.connect()`/`teleop.connect()` above already left torque enabled
+    # (each device's own connect() ends by calling configure(), which restores
+    # torque on exit). Re-running configure() after write_calibration() below
+    # puts torque back the way connect() left it - without it, the arm stays
+    # torque-disabled for the rest of the session: send_action() calls
+    # succeed (no exception) but the motors never actually move.
     if hasattr(robot, "bus") and robot.calibration is not None:
         try:
             logger.info("Writing robot calibration to motors...")
+            robot.bus.disable_torque()
             robot.bus.write_calibration(robot.calibration)
+            robot.configure()
             logger.info("Robot calibration applied successfully")
         except Exception as e:
             logger.error(f"Error writing robot calibration: {e}")
@@ -682,7 +817,9 @@ def record_with_web_events(cfg: RecordConfig, web_events: dict) -> LeRobotDatase
     if teleop is not None and hasattr(teleop, "bus") and teleop.calibration is not None:
         try:
             logger.info("Writing teleop calibration to motors...")
+            teleop.bus.disable_torque()
             teleop.bus.write_calibration(teleop.calibration)
+            teleop.configure()
             logger.info("Teleop calibration applied successfully")
         except Exception as e:
             logger.error(f"Error writing teleop calibration: {e}")

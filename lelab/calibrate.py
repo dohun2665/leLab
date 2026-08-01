@@ -83,6 +83,11 @@ class CalibrationRequest:
     config_file: str
     robot_name: str | None = None  # When set, write port + config back into the robot record on success
     robot_type: str = "so101"
+    # Which arm this calibration run is for, in bimanual mode. Only affects
+    # which robot-record fields the write-back below patches; the rest of the
+    # calibration flow (homing, range recording) is per-device and doesn't
+    # care which side it's calibrating.
+    side: Literal["left", "right"] = "left"
 
 
 class CalibrationManager:
@@ -517,10 +522,17 @@ class CalibrationManager:
         if request is not None and request.robot_name:
             from .utils.config import save_robot_record
 
+            prefix = "right_" if request.side == "right" else ""
             if request.device_type == "teleop":
-                patch = {"leader_port": request.port, "leader_config": f"{request.config_file}.json"}
+                patch = {
+                    f"{prefix}leader_port": request.port,
+                    f"{prefix}leader_config": f"{request.config_file}.json",
+                }
             else:
-                patch = {"follower_port": request.port, "follower_config": f"{request.config_file}.json"}
+                patch = {
+                    f"{prefix}follower_port": request.port,
+                    f"{prefix}follower_config": f"{request.config_file}.json",
+                }
             try:
                 save_robot_record(request.robot_name, patch, allow_create=False)
             except Exception as e:

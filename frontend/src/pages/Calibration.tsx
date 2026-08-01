@@ -32,14 +32,45 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import Logo from "@/components/Logo";
 import PortDetectionButton from "@/components/ui/PortDetectionButton";
-import PortDetectionModal from "@/components/ui/PortDetectionModal";
+import PortDetectionModal, { PortDetectionSide } from "@/components/ui/PortDetectionModal";
 import { useApi } from "@/contexts/ApiContext";
 import { isMotorRangeComplete } from "@/lib/calibrationTargets";
 import CameraConfiguration, {
   CameraConfig,
 } from "@/components/recording/CameraConfiguration";
+import { RobotRecord } from "@/hooks/useRobots";
 
 const DISCONTINUITY_ERROR_PREFIX = "Motor discontinuity detected";
+
+type Side = "left" | "right";
+
+// Maps a base field name to the record field for the given arm: the "left"
+// arm (or the only arm, in single mode) uses the plain field names; "right"
+// uses the right_-prefixed ones.
+const sideField = (
+  side: Side,
+  base: "leader_port" | "follower_port" | "leader_config" | "follower_config" | "robot_type"
+): keyof RobotRecord => (side === "right" ? (`right_${base}` as keyof RobotRecord) : base);
+
+const getSideValue = (r: RobotRecord | null, side: Side, base: Parameters<typeof sideField>[1]): string =>
+  (r ? ((r[sideField(side, base)] as string | undefined) ?? "") : "");
+
+// Default to the first incomplete step in the checklist: left leader, left
+// follower, then (bimanual only) right leader, right follower.
+const firstIncompleteSlot = (r: RobotRecord): { side: Side; deviceType: string } => {
+  if (!r.leader_config) return { side: "left", deviceType: "teleop" };
+  if (!r.follower_config) return { side: "left", deviceType: "robot" };
+  if (r.mode === "bimanual") {
+    if (!r.right_leader_config) return { side: "right", deviceType: "teleop" };
+    if (!r.right_follower_config) return { side: "right", deviceType: "robot" };
+  }
+  return { side: "left", deviceType: "teleop" };
+};
+
+const detectionRobotTypeFor = (side: Side, deviceType: string): PortDetectionSide => {
+  const base = deviceType === "robot" ? "follower" : "leader";
+  return side === "right" ? (`right_${base}` as PortDetectionSide) : (base as PortDetectionSide);
+};
 
 interface CalibrationStatus {
   calibration_active: boolean;
@@ -62,17 +93,7 @@ interface CalibrationRequest {
   config_file: string;
   robot_name: string | null;
   robot_type: string;
-}
-
-interface RobotRecord {
-  name: string;
-  leader_port: string;
-  follower_port: string;
-  leader_config: string;
-  follower_config: string;
-  cameras: CameraConfig[];
-  is_clean: boolean;
-  robot_type?: string;
+  side: Side; // which arm this run is for (bimanual only; "left" for single-arm)
 }
 
 const Calibration = () => {
@@ -87,9 +108,11 @@ const Calibration = () => {
   const demoVideoRef = useRef<HTMLDivElement>(null);
 
   const [deviceType, setDeviceType] = useState<string>("teleop");
+  const [side, setSide] = useState<Side>("left");
   const [port, setPort] = useState<string>("");
   const [robotType, setRobotType] = useState<string>("so101");
   const [robot, setRobot] = useState<RobotRecord | null>(null);
+  const isBimanual = robot?.mode === "bimanual";
   const [cameras, setCameras] = useState<CameraConfig[]>([]);
   // Off by default so merely opening the calibration page never grabs a camera.
   // The user explicitly starts a scan, which is when cameras are turned on,
@@ -107,9 +130,6 @@ const Calibration = () => {
       const data = await res.json();
       const r = (data.robot as RobotRecord | null) ?? null;
       setRobot(r);
-      if (r && r.robot_type) {
-        setRobotType(r.robot_type);
-      }
       return r;
     } catch (e) {
       console.error("Failed to load robot record:", e);
@@ -124,21 +144,13 @@ const Calibration = () => {
     (async () => {
       const r = await fetchRobot();
       if (!r || cancelled) return;
-      // Default to the first incomplete side in the checklist (leader, then follower).
-      const defaultDevice = !r.leader_config
-        ? "teleop"
-        : !r.follower_config
-        ? "robot"
-        : "teleop";
+      // Default to the first incomplete slot in the checklist (left leader,
+      // left follower, then - bimanual only - right leader, right follower).
+      const { side: defaultSide, deviceType: defaultDevice } = firstIncompleteSlot(r);
+      setSide(defaultSide);
       setDeviceType(defaultDevice);
-      setPort(
-        defaultDevice === "teleop"
-          ? r.leader_port || ""
-          : r.follower_port || ""
-      );
-      if (r.robot_type) {
-        setRobotType(r.robot_type);
-      }
+      setPort(getSideValue(r, defaultSide, defaultDevice === "robot" ? "follower_port" : "leader_port"));
+      setRobotType(getSideValue(r, defaultSide, "robot_type") || "so101");
       setCameras(r.cameras ?? []);
     })();
     return () => {
@@ -178,9 +190,7 @@ const Calibration = () => {
   }, []);
 
   const [showPortDetection, setShowPortDetection] = useState(false);
-  const [detectionRobotType, setDetectionRobotType] = useState<
-    "leader" | "follower"
-  >("leader");
+  const [detectionRobotType, setDetectionRobotType] = useState<PortDetectionSide>("leader");
 
   const [calibrationStatus, setCalibrationStatus] = useState<CalibrationStatus>(
     {
@@ -257,12 +267,15 @@ const Calibration = () => {
       return;
     }
 
+    // Right-arm config files get a "_right" suffix so they never collide with
+    // the left arm's when both sides share the same robot_type.
     const request: CalibrationRequest = {
       device_type: deviceType,
       port: port,
-      config_file: robotName,
+      config_file: side === "right" ? `${robotName}_right` : robotName,
       robot_name: robotName,
       robot_type: robotType,
+      side,
     };
 
     // Optimistically mark as active so the unmount cleanup will fire even if
@@ -281,7 +294,9 @@ const Calibration = () => {
       if (result.success) {
         toast({
           title: "Calibration Started",
-          description: `Calibration started for ${deviceType}`,
+          description: isBimanual
+            ? `Calibration started for ${side} ${deviceType}`
+            : `Calibration started for ${deviceType}`,
         });
         setIsPolling(true);
       } else {
@@ -422,36 +437,46 @@ const Calibration = () => {
   const handleDeviceTypeChange = (next: string) => {
     setDeviceType(next);
     if (!robot) return;
-    setPort(
-      next === "teleop" ? robot.leader_port || "" : robot.follower_port || ""
-    );
+    setPort(getSideValue(robot, side, next === "robot" ? "follower_port" : "leader_port"));
+    setRobotType(getSideValue(robot, side, "robot_type") || "so101");
+  };
+
+  const handleSideChange = (next: Side) => {
+    setSide(next);
+    if (!robot) return;
+    setPort(getSideValue(robot, next, deviceType === "robot" ? "follower_port" : "leader_port"));
+    setRobotType(getSideValue(robot, next, "robot_type") || "so101");
+  };
+
+  // Jump straight to a checklist slot (used by the clickable checklist rows
+  // below) - sets side + device type together so the derived port/robotType
+  // reflect the *target* slot, not a stale combination of old+new.
+  const jumpToSlot = (targetSide: Side, targetDevice: string) => {
+    if (!robot) return;
+    setSide(targetSide);
+    setDeviceType(targetDevice);
+    setPort(getSideValue(robot, targetSide, targetDevice === "robot" ? "follower_port" : "leader_port"));
+    setRobotType(getSideValue(robot, targetSide, "robot_type") || "so101");
   };
 
   // Refresh the robot record when a calibration completes so the checklist
-  // flips to ✓ for the side that was just saved, and advance Device Type to
-  // the next still-incomplete side (or stay on the current side if both done).
+  // flips to ✓ for the slot that was just saved, and advance to the next
+  // still-incomplete slot (or stay put if everything's done).
   useEffect(() => {
     if (calibrationStatus.status !== "completed") return;
     (async () => {
       const r = await fetchRobot();
       if (!r) return;
-      const nextDevice = !r.leader_config
-        ? "teleop"
-        : !r.follower_config
-        ? "robot"
-        : "teleop";
+      const { side: nextSide, deviceType: nextDevice } = firstIncompleteSlot(r);
+      setSide(nextSide);
       setDeviceType(nextDevice);
-      setPort(
-        nextDevice === "teleop"
-          ? r.leader_port || ""
-          : r.follower_port || ""
-      );
+      setPort(getSideValue(r, nextSide, nextDevice === "robot" ? "follower_port" : "leader_port"));
+      setRobotType(getSideValue(r, nextSide, "robot_type") || "so101");
     })();
   }, [calibrationStatus.status, fetchRobot]);
 
   const handlePortDetection = () => {
-    const robotType = deviceType === "robot" ? "follower" : "leader";
-    setDetectionRobotType(robotType);
+    setDetectionRobotType(detectionRobotTypeFor(side, deviceType));
     setShowPortDetection(true);
   };
 
@@ -461,7 +486,7 @@ const Calibration = () => {
   const persistPort = useCallback(
     async (nextPort: string) => {
       if (!robotName || !nextPort) return;
-      const field = deviceType === "robot" ? "follower_port" : "leader_port";
+      const field = sideField(side, deviceType === "robot" ? "follower_port" : "leader_port");
       // Skip redundant writes when the value already matches the record.
       if (robot && robot[field] === nextPort) return;
       try {
@@ -479,20 +504,21 @@ const Calibration = () => {
         console.error("Failed to save port to robot record:", e);
       }
     },
-    [robotName, deviceType, robot, baseUrl, fetchWithHeaders]
+    [robotName, deviceType, side, robot, baseUrl, fetchWithHeaders]
   );
 
   const persistRobotType = useCallback(
     async (nextType: string) => {
       if (!robotName || !nextType) return;
-      if (robot && robot.robot_type === nextType) return;
+      const field = sideField(side, "robot_type");
+      if (robot && robot[field] === nextType) return;
       try {
         const res = await fetchWithHeaders(
           `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ robot_type: nextType }),
+            body: JSON.stringify({ [field]: nextType }),
           }
         );
         const data = await res.json();
@@ -501,7 +527,42 @@ const Calibration = () => {
         console.error("Failed to save robot type to robot record:", e);
       }
     },
-    [robotName, robot, baseUrl, fetchWithHeaders]
+    [robotName, side, robot, baseUrl, fetchWithHeaders]
+  );
+
+  // Converts an existing robot between single-arm and bimanual. Turning
+  // bimanual on just starts exposing the (already-present) right_* fields -
+  // the existing leader_port/follower_port/etc. keep meaning "left arm".
+  // Turning it off snaps the UI back to "left" so persistPort/persistRobotType
+  // don't keep writing to the right_* fields after the Arm selector disappears.
+  const persistMode = useCallback(
+    async (nextMode: "single" | "bimanual") => {
+      if (!robotName) return;
+      if (robot && (robot.mode ?? "single") === nextMode) return;
+      try {
+        const res = await fetchWithHeaders(
+          `${baseUrl}/robots/${encodeURIComponent(robotName)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: nextMode }),
+          }
+        );
+        const data = await res.json();
+        const updated = data.robot as RobotRecord | undefined;
+        if (updated) {
+          setRobot(updated);
+          if (nextMode === "single") {
+            setSide("left");
+            setPort(getSideValue(updated, "left", deviceType === "robot" ? "follower_port" : "leader_port"));
+            setRobotType(getSideValue(updated, "left", "robot_type") || "so101");
+          }
+        }
+      } catch (e) {
+        console.error("Failed to save mode to robot record:", e);
+      }
+    },
+    [robotName, robot, deviceType, baseUrl, fetchWithHeaders]
   );
 
   const handlePortDetected = (detectedPort: string) => {
@@ -626,6 +687,48 @@ const Calibration = () => {
                 </Select>
               </div>
 
+              <div className="flex items-center justify-between gap-2">
+                <Label
+                  htmlFor="bimanual-toggle"
+                  className="text-sm font-medium text-slate-300 cursor-pointer"
+                >
+                  Bimanual (2 arms)
+                </Label>
+                <Switch
+                  id="bimanual-toggle"
+                  checked={isBimanual}
+                  onCheckedChange={(checked) => persistMode(checked ? "bimanual" : "single")}
+                  className="data-[state=checked]:bg-green-500"
+                />
+              </div>
+
+              {isBimanual && (
+                <div className="space-y-2">
+                  <Label
+                    htmlFor="side"
+                    className="text-sm font-medium text-slate-300"
+                  >
+                    Arm *
+                  </Label>
+                  <Select
+                    value={side}
+                    onValueChange={(val) => handleSideChange(val as Side)}
+                  >
+                    <SelectTrigger className="bg-slate-700 border-slate-600 text-white rounded-md">
+                      <SelectValue placeholder="Select arm" />
+                    </SelectTrigger>
+                    <SelectContent className="bg-slate-800 border-slate-700 text-white">
+                      <SelectItem value="left" className="hover:bg-slate-700">
+                        Left
+                      </SelectItem>
+                      <SelectItem value="right" className="hover:bg-slate-700">
+                        Right
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Label
                   htmlFor="deviceType"
@@ -669,7 +772,7 @@ const Calibration = () => {
                   />
                   <PortDetectionButton
                     onClick={handlePortDetection}
-                    robotType={deviceType === "robot" ? "follower" : "leader"}
+                    robotType={detectionRobotTypeFor(side, deviceType)}
                     className="border-slate-600 hover:border-blue-500 text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600"
                   />
                 </div>
@@ -704,36 +807,39 @@ const Calibration = () => {
                   <div className="text-sm font-medium text-slate-300">
                     Robot calibration
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.leader_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.leader_config ? "text-slate-200" : "text-slate-400"
-                      }
-                    >
-                      Leader (Teleoperator)
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    {robot.follower_config ? (
-                      <CheckCircle className="w-4 h-4 text-green-400" />
-                    ) : (
-                      <Circle className="w-4 h-4 text-slate-500" />
-                    )}
-                    <span
-                      className={
-                        robot.follower_config
-                          ? "text-slate-200"
-                          : "text-slate-400"
-                      }
-                    >
-                      Follower (Robot)
-                    </span>
-                  </div>
+                  {(
+                    [
+                      { side: "left", deviceType: "teleop", label: isBimanual ? "Left leader" : "Leader (Teleoperator)", done: !!robot.leader_config },
+                      { side: "left", deviceType: "robot", label: isBimanual ? "Left follower" : "Follower (Robot)", done: !!robot.follower_config },
+                      ...(isBimanual
+                        ? [
+                            { side: "right" as const, deviceType: "teleop", label: "Right leader", done: !!robot.right_leader_config },
+                            { side: "right" as const, deviceType: "robot", label: "Right follower", done: !!robot.right_follower_config },
+                          ]
+                        : []),
+                    ] as { side: Side; deviceType: string; label: string; done: boolean }[]
+                  ).map((item) => {
+                    const active = item.side === side && item.deviceType === deviceType;
+                    return (
+                      <button
+                        key={`${item.side}-${item.deviceType}`}
+                        type="button"
+                        onClick={() => jumpToSlot(item.side, item.deviceType)}
+                        className={`flex items-center gap-2 text-sm w-full text-left rounded-md px-1 -mx-1 py-0.5 hover:bg-slate-700/50 ${
+                          active ? "bg-slate-700/40" : ""
+                        }`}
+                      >
+                        {item.done ? (
+                          <CheckCircle className="w-4 h-4 text-green-400" />
+                        ) : (
+                          <Circle className="w-4 h-4 text-slate-500" />
+                        )}
+                        <span className={item.done ? "text-slate-200" : "text-slate-400"}>
+                          {item.label}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

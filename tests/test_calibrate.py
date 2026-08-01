@@ -103,6 +103,79 @@ def test_cleanup_device_force_releases_and_clears_when_disconnect_fails() -> Non
     assert mgr.device is None  # handle cleared so a new calibration can start
 
 
+def test_calibration_request_side_defaults_to_left() -> None:
+    from lelab.calibrate import CalibrationRequest
+
+    req = CalibrationRequest(device_type="teleop", port="/dev/ttyUSB0", config_file="my_calib")
+    assert req.side == "left"
+
+
+def _make_fake_calibration_device():
+    class FakeBus:
+        motors: dict = {}
+
+        def write_calibration(self, calibration: dict) -> None:
+            pass
+
+    class FakeDevice:
+        bus = FakeBus()
+        calibration_fpath = "/tmp/fake.json"
+
+        def __init__(self) -> None:
+            self.calibration = None
+
+        def _save_calibration(self) -> None:
+            pass
+
+    return FakeDevice()
+
+
+def test_complete_calibration_write_back_patches_left_fields_by_default(monkeypatch) -> None:
+    """side='left' (the default) must patch the plain leader/follower fields,
+    not the right_* ones."""
+    from lelab.calibrate import CalibrationManager, CalibrationRequest
+
+    calls = []
+    monkeypatch.setattr(
+        "lelab.utils.config.save_robot_record", lambda name, patch, **kw: calls.append((name, patch))
+    )
+
+    mgr = CalibrationManager()
+    mgr.device = _make_fake_calibration_device()
+    mgr._homing_offsets = {}
+    mgr._mins = {}
+    mgr._maxes = {}
+    mgr._current_request = CalibrationRequest(
+        device_type="robot", port="/dev/ttyUSB1", config_file="rig", robot_name="rig", side="left"
+    )
+
+    mgr._complete_calibration()
+
+    assert calls == [("rig", {"follower_port": "/dev/ttyUSB1", "follower_config": "rig.json"})]
+
+
+def test_complete_calibration_write_back_patches_right_fields_for_right_side(monkeypatch) -> None:
+    from lelab.calibrate import CalibrationManager, CalibrationRequest
+
+    calls = []
+    monkeypatch.setattr(
+        "lelab.utils.config.save_robot_record", lambda name, patch, **kw: calls.append((name, patch))
+    )
+
+    mgr = CalibrationManager()
+    mgr.device = _make_fake_calibration_device()
+    mgr._homing_offsets = {}
+    mgr._mins = {}
+    mgr._maxes = {}
+    mgr._current_request = CalibrationRequest(
+        device_type="teleop", port="/dev/ttyUSB2", config_file="rig_right", robot_name="rig", side="right"
+    )
+
+    mgr._complete_calibration()
+
+    assert calls == [("rig", {"right_leader_port": "/dev/ttyUSB2", "right_leader_config": "rig_right.json"})]
+
+
 def test_position_operating_mode_matches_bus_protocol() -> None:
     # Feetech and Dynamixel use different POSITION register values (0 vs 3);
     # the helper must pick the enum matching the bus's protocol, or OMX

@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import VisualizerPanel from "@/components/control/VisualizerPanel";
+import VisualizerPanel, { BimanualViewerSpec } from "@/components/control/VisualizerPanel";
 import TeleopCameraPanel from "@/components/control/TeleopCameraPanel";
 import { useToast } from "@/hooks/use-toast";
 import { useApi } from "@/contexts/ApiContext";
 import { useUrdf } from "@/hooks/useUrdf";
 import { resolveDefaultRobotType } from "@/lib/defaultUrdfModels";
+import type { RobotRecord } from "@/hooks/useRobots";
 
 // Matches useRobots.ts's SELECTED_KEY - the last robot picked on Landing.
 const SELECTED_ROBOT_KEY = "lelab.selectedRobot";
@@ -15,9 +16,13 @@ const TeleoperationPage = () => {
   const { toast } = useToast();
   const { baseUrl, fetchWithHeaders } = useApi();
   const { setDefaultRobotType } = useUrdf();
+  const [bimanualViewers, setBimanualViewers] = useState<
+    [BimanualViewerSpec, BimanualViewerSpec] | null
+  >(null);
 
-  // Show the 3D model matching the arm that's actually connected (SO-101 vs
-  // OMX-AI) instead of always defaulting to SO-101.
+  // Show the 3D model(s) matching the arm(s) actually connected (SO-101 vs
+  // OMX-AI, and both sides for a bimanual robot) instead of always defaulting
+  // to a single SO-101 model.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -33,8 +38,15 @@ const TeleoperationPage = () => {
           `${baseUrl}/robots/${encodeURIComponent(name)}`
         );
         const data = await res.json();
-        if (!cancelled && data?.robot?.robot_type) {
-          setDefaultRobotType(resolveDefaultRobotType(data.robot.robot_type));
+        const robot = data?.robot as RobotRecord | undefined;
+        if (cancelled || !robot) return;
+        if (robot.mode === "bimanual") {
+          setBimanualViewers([
+            { robotType: resolveDefaultRobotType(robot.robot_type), jointPrefix: "left_", label: "Left" },
+            { robotType: resolveDefaultRobotType(robot.right_robot_type), jointPrefix: "right_", label: "Right" },
+          ]);
+        } else if (robot.robot_type) {
+          setDefaultRobotType(resolveDefaultRobotType(robot.robot_type));
         }
       } catch {
         /* best-effort - falls back to the default SO-101 model */
@@ -109,6 +121,7 @@ const TeleoperationPage = () => {
           onGoBack={handleGoBack}
           className="lg:w-full"
           rightSlot={<TeleopCameraPanel />}
+          bimanualViewers={bimanualViewers ?? undefined}
         />
       </div>
     </div>

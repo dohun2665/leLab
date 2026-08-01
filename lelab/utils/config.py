@@ -23,7 +23,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-RobotSide = Literal["leader", "follower"]
+RobotSide = Literal["leader", "follower", "right_leader", "right_follower"]
 
 # Define the calibration config paths (shared between features)
 CALIBRATION_BASE_PATH_TELEOP = os.path.expanduser("~/.cache/huggingface/lerobot/calibration/teleoperators")
@@ -56,11 +56,17 @@ def get_calibration_path(robot_type: str | None, side: Literal["leader", "follow
 PORT_CONFIG_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/ports")
 LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "leader_port.txt")
 FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "follower_port.txt")
+# Bimanual right arm - the fields above are the left arm (or the only arm, in
+# single-arm mode).
+RIGHT_LEADER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "right_leader_port.txt")
+RIGHT_FOLLOWER_PORT_FILE = os.path.join(PORT_CONFIG_PATH, "right_follower_port.txt")
 
 # Define configuration storage path
 CONFIG_STORAGE_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/saved_configs")
 LEADER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "leader_config.txt")
 FOLLOWER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "follower_config.txt")
+RIGHT_LEADER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "right_leader_config.txt")
+RIGHT_FOLLOWER_CONFIG_FILE = os.path.join(CONFIG_STORAGE_PATH, "right_follower_config.txt")
 
 # Robot config records (per-robot JSON metadata)
 ROBOTS_PATH = os.path.expanduser("~/.cache/huggingface/lerobot/robots")
@@ -94,7 +100,13 @@ def _port_file_for(robot_type: RobotSide) -> str:
         return LEADER_PORT_FILE
     if robot_type == "follower":
         return FOLLOWER_PORT_FILE
-    raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
+    if robot_type == "right_leader":
+        return RIGHT_LEADER_PORT_FILE
+    if robot_type == "right_follower":
+        return RIGHT_FOLLOWER_PORT_FILE
+    raise ValueError(
+        f"robot_type must be 'leader', 'follower', 'right_leader' or 'right_follower', got {robot_type!r}"
+    )
 
 
 def _config_file_for(robot_type: RobotSide) -> str:
@@ -103,7 +115,13 @@ def _config_file_for(robot_type: RobotSide) -> str:
         return LEADER_CONFIG_FILE
     if rt == "follower":
         return FOLLOWER_CONFIG_FILE
-    raise ValueError(f"robot_type must be 'leader' or 'follower', got {robot_type!r}")
+    if rt == "right_leader":
+        return RIGHT_LEADER_CONFIG_FILE
+    if rt == "right_follower":
+        return RIGHT_FOLLOWER_CONFIG_FILE
+    raise ValueError(
+        f"robot_type must be 'leader', 'follower', 'right_leader' or 'right_follower', got {robot_type!r}"
+    )
 
 
 def setup_calibration_files(leader_config: str, follower_config: str, robot_type: str = "so101"):
@@ -360,7 +378,23 @@ def get_default_robot_config(robot_type: str, available_configs: list):
 
 # Characters disallowed in a robot name (filesystem safety)
 _INVALID_NAME_CHARS = ("/", "\\", "..")
-_ROBOT_STRING_FIELDS = ("leader_port", "follower_port", "leader_config", "follower_config", "robot_type")
+# `mode` selects "single" (default, one leader+one follower) vs "bimanual"
+# (adds a right arm). In bimanual mode, the four original fields below plus
+# `robot_type` describe the *left* arm; the `right_*` fields describe the
+# right arm. Single-arm records never populate the `right_*` fields.
+_ROBOT_STRING_FIELDS = (
+    "leader_port",
+    "follower_port",
+    "leader_config",
+    "follower_config",
+    "robot_type",
+    "mode",
+    "right_leader_port",
+    "right_follower_port",
+    "right_leader_config",
+    "right_follower_config",
+    "right_robot_type",
+)
 _ROBOT_LIST_FIELDS = ("cameras",)
 
 
@@ -384,6 +418,8 @@ def _empty_record(name: str) -> dict:
     for field in _ROBOT_LIST_FIELDS:
         record[field] = []
     record["robot_type"] = "so101"
+    record["mode"] = "single"
+    record["right_robot_type"] = "so101"
     return record
 
 
@@ -460,6 +496,15 @@ def save_robot_record(name: str, data: dict, allow_create: bool = True) -> bool:
         if not record.get("follower_config", "").strip():
             record["follower_config"] = f"{name}.json"
 
+    # Right arm (bimanual only) - config filenames get a "_right" suffix so
+    # they never collide with the left arm's when both sides share the same
+    # robot_type (e.g. so101 + so101).
+    if record.get("mode") == "bimanual" and is_omx_robot_type(record.get("right_robot_type")):
+        if not record.get("right_leader_config", "").strip():
+            record["right_leader_config"] = f"{name}_right.json"
+        if not record.get("right_follower_config", "").strip():
+            record["right_follower_config"] = f"{name}_right.json"
+
     path = _robot_record_path(name)
     _atomic_write_text(path, json.dumps(record, indent=2))
     logger.info(f"Saved robot record {name}: {record}")
@@ -478,16 +523,31 @@ def delete_robot_record(name: str) -> bool:
     return True
 
 
+def _side_calibration_exists(robot_type: str, leader_config: str, follower_config: str) -> bool:
+    """OMX arms are exempt: they don't go through LeLab's web calibration flow
+    and self-calibrate on first connect (see is_omx_robot_type /
+    OmxFollower.connect() in lerobot), so ports+config names being set is
+    enough to be considered ready for teleoperation."""
+    if is_omx_robot_type(robot_type):
+        return True
+
+    leader_calib_path = get_calibration_path(robot_type, "leader")
+    follower_calib_path = get_calibration_path(robot_type, "follower")
+
+    leader_path = os.path.join(leader_calib_path, leader_config)
+    follower_path = os.path.join(follower_calib_path, follower_config)
+    return os.path.exists(leader_path) and os.path.exists(follower_path)
+
+
 def is_robot_record_clean(record: dict) -> bool:
     """
-    A record is 'clean' when all four operational fields are populated AND both
+    A record is 'clean' when all its operational fields are populated AND all
     referenced calibration files exist on disk. Cameras are optional and don't
     affect cleanliness.
 
-    OMX arms are exempt from the calibration-file-exists check: they don't go
-    through LeLab's web calibration flow and self-calibrate on first connect
-    (see is_omx_robot_type / OmxFollower.connect() in lerobot), so ports+config
-    names being set is enough to be considered ready for teleoperation.
+    In bimanual mode (`record["mode"] == "bimanual"`), the left arm's four
+    original fields plus the five `right_*` fields must all be populated, and
+    both arms' calibration files must exist.
     """
     if not record:
         return False
@@ -500,13 +560,27 @@ def is_robot_record_clean(record: dict) -> bool:
         if not isinstance(value, str) or not value.strip():
             return False
 
-    robot_type = record.get("robot_type", "so101")
-    if is_omx_robot_type(robot_type):
+    if not _side_calibration_exists(
+        record.get("robot_type", "so101"), record["leader_config"], record["follower_config"]
+    ):
+        return False
+
+    if record.get("mode") != "bimanual":
         return True
 
-    leader_calib_path = get_calibration_path(robot_type, "leader")
-    follower_calib_path = get_calibration_path(robot_type, "follower")
+    right_fields = (
+        "right_leader_port",
+        "right_follower_port",
+        "right_leader_config",
+        "right_follower_config",
+    )
+    for field in right_fields:
+        value = record.get(field, "")
+        if not isinstance(value, str) or not value.strip():
+            return False
 
-    leader_path = os.path.join(leader_calib_path, record["leader_config"])
-    follower_path = os.path.join(follower_calib_path, record["follower_config"])
-    return os.path.exists(leader_path) and os.path.exists(follower_path)
+    return _side_calibration_exists(
+        record.get("right_robot_type", "so101"),
+        record["right_leader_config"],
+        record["right_follower_config"],
+    )

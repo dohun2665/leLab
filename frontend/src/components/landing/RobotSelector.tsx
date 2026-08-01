@@ -20,7 +20,11 @@ interface RobotSelectorProps {
   selectedName: string | null;
   availableNames: string[];
   onSelect: (name: string) => void;
-  onCreateNew: (name: string, robotType: string) => Promise<boolean>;
+  onCreateNew: (
+    name: string,
+    robotType: string,
+    options?: { bimanual?: boolean; rightRobotType?: string }
+  ) => Promise<boolean>;
   isLoading: boolean;
 }
 
@@ -39,6 +43,8 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [newRobotType, setNewRobotType] = useState("so101");
+  const [bimanual, setBimanual] = useState(false);
+  const [rightRobotType, setRightRobotType] = useState("so101");
 
   const trimmed = query.trim();
   const matchesExisting = availableNames.some(
@@ -56,6 +62,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
   const reset = () => {
     setQuery("");
     setOpen(false);
+    setBimanual(false);
   };
 
   const handlePickExisting = (name: string) => {
@@ -65,7 +72,11 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
 
   const handleCreate = async () => {
     if (!canCreate) return;
-    const ok = await onCreateNew(trimmed, newRobotType);
+    const ok = await onCreateNew(
+      trimmed,
+      newRobotType,
+      bimanual ? { bimanual: true, rightRobotType } : undefined
+    );
     if (ok) reset();
   };
 
@@ -135,7 +146,7 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
           <div className="border-t border-gray-700">
             {canCreate && (
               <div className="flex items-center gap-1.5 px-3 pt-2">
-                <span className="text-xs text-gray-400">Model:</span>
+                <span className="text-xs text-gray-400">{bimanual ? "Left arm:" : "Model:"}</span>
                 {ROBOT_MODELS.map((model) => (
                   <button
                     key={model.value}
@@ -144,6 +155,37 @@ const RobotSelector: React.FC<RobotSelectorProps> = ({
                     className={cn(
                       "rounded-full border px-2.5 py-0.5 text-xs",
                       newRobotType === model.value
+                        ? "border-blue-400 bg-blue-500/20 text-blue-300"
+                        : "border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-300"
+                    )}
+                  >
+                    {model.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {canCreate && (
+              <label className="flex items-center gap-1.5 px-3 pt-2 text-xs text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={bimanual}
+                  onChange={(e) => setBimanual(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-blue-500"
+                />
+                Bimanual (2 arms)
+              </label>
+            )}
+            {canCreate && bimanual && (
+              <div className="flex items-center gap-1.5 px-3 pt-2">
+                <span className="text-xs text-gray-400">Right arm:</span>
+                {ROBOT_MODELS.map((model) => (
+                  <button
+                    key={model.value}
+                    type="button"
+                    onClick={() => setRightRobotType(model.value)}
+                    className={cn(
+                      "rounded-full border px-2.5 py-0.5 text-xs",
+                      rightRobotType === model.value
                         ? "border-blue-400 bg-blue-500/20 text-blue-300"
                         : "border-gray-600 text-gray-400 hover:border-gray-500 hover:text-gray-300"
                     )}
